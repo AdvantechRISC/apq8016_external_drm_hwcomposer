@@ -23,46 +23,9 @@
 #include <hardware/hardware.h>
 #include <hardware/hwcomposer.h>
 #include "seperate_rects.h"
+#include "drmhwcgralloc.h"
 
 struct hwc_import_context;
-
-enum {
-  /* perform(const struct gralloc_module_t *mod,
-   *	   int op,
-   *	   int drm_fd,
-   *	   buffer_handle_t buffer,
-   *	   struct hwc_drm_bo *bo);
-   */
-  GRALLOC_MODULE_PERFORM_DRM_IMPORT = 0xffeeff00,
-
-  /* perform(const struct gralloc_module_t *mod,
-   *	   int op,
-   *	   buffer_handle_t buffer,
-   *	   void (*free_callback)(void *),
-   *	   void *priv);
-   */
-  GRALLOC_MODULE_PERFORM_SET_IMPORTER_PRIVATE = 0xffeeff01,
-
-  /* perform(const struct gralloc_module_t *mod,
-   *	   int op,
-   *	   buffer_handle_t buffer,
-   *	   void (*free_callback)(void *),
-   *	   void **priv);
-   */
-  GRALLOC_MODULE_PERFORM_GET_IMPORTER_PRIVATE = 0xffeeff02,
-};
-
-typedef struct hwc_drm_bo {
-  uint32_t width;
-  uint32_t height;
-  uint32_t format; /* DRM_FORMAT_* from drm_fourcc.h */
-  uint32_t pitches[4];
-  uint32_t offsets[4];
-  uint32_t gem_handles[4];
-  uint32_t fb_id;
-  int acquire_fence_fd;
-  void *priv;
-} hwc_drm_bo_t;
 
 int hwc_import_init(struct hwc_import_context **ctx);
 int hwc_import_destroy(struct hwc_import_context *ctx);
@@ -171,11 +134,11 @@ class DrmHwcBuffer {
     return *this;
   }
 
-  operator bool() {
+  operator bool() const {
     return importer_ != NULL;
   }
 
-  hwc_drm_bo *operator->();
+  const hwc_drm_bo *operator->() const;
 
   void Clear();
 
@@ -245,6 +208,7 @@ enum class DrmHwcBlending : int32_t {
 
 struct DrmHwcLayer {
   buffer_handle_t sf_handle = NULL;
+  int gralloc_buffer_usage = 0;
   DrmHwcBuffer buffer;
   DrmHwcNativeHandle handle;
   DrmHwcTransform transform = DrmHwcTransform::kIdentity;
@@ -257,11 +221,12 @@ struct DrmHwcLayer {
   UniqueFd acquire_fence;
   OutputFd release_fence;
 
-  DrmHwcLayer() = default;
-  DrmHwcLayer(DrmHwcLayer &&rhs) = default;
-
   int InitFromHwcLayer(hwc_layer_1_t *sf_layer, Importer *importer,
                        const gralloc_module_t *gralloc);
+
+  buffer_handle_t get_usable_handle() const {
+    return handle.get() != NULL ? handle.get() : sf_handle;
+  }
 };
 
 struct DrmHwcDisplayContents {

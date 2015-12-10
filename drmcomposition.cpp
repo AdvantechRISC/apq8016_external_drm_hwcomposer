@@ -58,10 +58,9 @@ int DrmComposition::Init(uint64_t frame_no) {
     // If the display hasn't been modeset yet, this will be NULL
     DrmCrtc *crtc = drm_->GetCrtcForDisplay(display);
 
-    int ret = composition_map_[(*iter)->display()]->Init(drm_, crtc, importer_,
-                                                         frame_no);
+    int ret = composition_map_[display]->Init(drm_, crtc, importer_, frame_no);
     if (ret) {
-      ALOGE("Failed to init display composition for %d", (*iter)->display());
+      ALOGE("Failed to init display composition for %d", display);
       return ret;
     }
   }
@@ -76,14 +75,18 @@ int DrmComposition::SetLayers(size_t num_displays,
     DrmCompositionDisplayLayersMap &map = maps[display_index];
     int display = map.display;
 
+    if (!drm_->GetConnectorForDisplay(display)) {
+      ALOGE("Invalid display given to SetLayers %d", display);
+      continue;
+    }
+
     ret = composition_map_[display]->SetLayers(
-        map.layers.data(), map.layers.size(), &primary_planes_,
-        &overlay_planes_);
+        map.layers.data(), map.layers.size(), map.geometry_changed);
     if (ret)
       return ret;
   }
 
-  return DisableUnusedPlanes();
+  return 0;
 }
 
 int DrmComposition::SetDpmsMode(int display, uint32_t dpms_mode) {
@@ -97,6 +100,23 @@ int DrmComposition::SetDisplayMode(int display, const DrmMode &display_mode) {
 std::unique_ptr<DrmDisplayComposition> DrmComposition::TakeDisplayComposition(
     int display) {
   return std::move(composition_map_[display]);
+}
+
+int DrmComposition::Plan(std::map<int, DrmDisplayCompositor> &compositor_map) {
+  int ret = 0;
+  for (DrmResources::ConnectorIter iter = drm_->begin_connectors();
+       iter != drm_->end_connectors(); ++iter) {
+    int display = (*iter)->display();
+    DrmDisplayComposition *comp = GetDisplayComposition(display);
+    ret = comp->Plan(compositor_map[display].squash_state(), &primary_planes_,
+                     &overlay_planes_);
+    if (ret) {
+      ALOGE("Failed to plan composition for dislay %d", display);
+      return ret;
+    }
+  }
+
+  return 0;
 }
 
 int DrmComposition::DisableUnusedPlanes() {

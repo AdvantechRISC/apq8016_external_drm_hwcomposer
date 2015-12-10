@@ -33,7 +33,8 @@
 
 namespace android {
 
-struct DrmCompositionLayer;
+struct DrmHwcLayer;
+struct DrmCompositionRegion;
 
 class GLWorkerCompositor {
  public:
@@ -41,8 +42,8 @@ class GLWorkerCompositor {
   ~GLWorkerCompositor();
 
   int Init();
-  int Composite(DrmCompositionLayer *layers, size_t num_layers,
-                const sp<GraphicBuffer> &framebuffer);
+  int Composite(DrmHwcLayer *layers, DrmCompositionRegion *regions,
+                size_t num_regions, const sp<GraphicBuffer> &framebuffer);
   void Finish();
 
  private:
@@ -66,6 +67,8 @@ class GLWorkerCompositor {
       const sp<GraphicBuffer> &framebuffer);
   CachedFramebuffer *PrepareAndCacheFramebuffer(
       const sp<GraphicBuffer> &framebuffer);
+
+  GLint PrepareAndCacheProgram(unsigned texture_count);
 
   EGLDisplay egl_display_;
   EGLContext egl_ctx_;

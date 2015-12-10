@@ -18,6 +18,8 @@
 #define DRM_HWCOMPOSER_SEPERATE_RECTS_H_
 
 #include <stdint.h>
+
+#include <sstream>
 #include <vector>
 
 namespace seperate_rects {
@@ -63,6 +65,23 @@ struct Rect {
     }
 
     return true;
+  }
+
+  TFloat width() const {
+    return bounds[2] - bounds[0];
+  }
+
+  TFloat height() const {
+    return bounds[3] - bounds[1];
+  }
+
+  TFloat area() const {
+    return width() * height();
+  }
+
+  void Dump(std::ostringstream *out) const {
+    *out << "[x/y/w/h]=" << left << "/" << top << "/" << width() << "/"
+         << height();
   }
 };
 
@@ -140,8 +159,10 @@ struct RectSet {
 // rectangle indices that overlap the output rectangle encoded in a bitset. For
 // example, an output rectangle that overlaps input rectangles in[0], in[1], and
 // in[4], the bitset would be (ommitting leading zeroes) 10011.
-void seperate_frects_64(const std::vector<Rect<float> > &in,
-                        std::vector<RectSet<uint64_t, float> > *out);
+void seperate_frects_64(const std::vector<Rect<float>> &in,
+                        std::vector<RectSet<uint64_t, float>> *out);
+void seperate_rects_64(const std::vector<Rect<int>> &in,
+                       std::vector<RectSet<uint64_t, int>> *out);
 
 }  // namespace seperate_rects
 

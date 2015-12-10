@@ -46,7 +46,6 @@
 #include <utils/Trace.h>
 
 #define UM_PER_INCH 25400
-#define HWC_FB_BUFFERS 3
 
 namespace android {
 
@@ -130,7 +129,7 @@ struct hwc_context_t {
   typedef std::map<int, hwc_drm_display_t> DisplayMap;
   typedef DisplayMap::iterator DisplayMapIter;
 
-  hwc_context_t() : procs(NULL), importer(NULL), use_framebuffer_target(false) {
+  hwc_context_t() : procs(NULL), importer(NULL) {
   }
 
   ~hwc_context_t() {
@@ -146,7 +145,6 @@ struct hwc_context_t {
   Importer *importer;
   const gralloc_module_t *gralloc;
   DummySwSyncTimeline dummy_timeline;
-  bool use_framebuffer_target;
   VirtualCompositorWorker virtual_compositor_worker;
 };
 
@@ -191,9 +189,9 @@ OutputFd &OutputFd::operator=(OutputFd &&rhs) {
   return *this;
 }
 
-hwc_drm_bo *DrmHwcBuffer::operator->() {
+const hwc_drm_bo *DrmHwcBuffer::operator->() const {
   if (importer_ == NULL) {
-    ALOGE("Access of none existent BO");
+    ALOGE("Access of non-existent BO");
     exit(1);
     return NULL;
   }
@@ -264,15 +262,14 @@ void DrmHwcNativeHandle::Clear() {
 int DrmHwcLayer::InitFromHwcLayer(hwc_layer_1_t *sf_layer, Importer *importer,
                                   const gralloc_module_t *gralloc) {
   sf_handle = sf_layer->handle;
-  int ret = buffer.ImportBuffer(sf_layer->handle, importer);
-  if (ret)
-    return ret;
-
-  ret = handle.CopyBufferHandle(sf_layer->handle, gralloc);
-  if (ret)
-    return ret;
-
   alpha = sf_layer->planeAlpha;
+
+  source_crop = DrmHwcRect<float>(
+      sf_layer->sourceCropf.left, sf_layer->sourceCropf.top,
+      sf_layer->sourceCropf.right, sf_layer->sourceCropf.bottom);
+  display_frame = DrmHwcRect<int>(
+      sf_layer->displayFrame.left, sf_layer->displayFrame.top,
+      sf_layer->displayFrame.right, sf_layer->displayFrame.bottom);
 
   switch (sf_layer->transform) {
     case 0:
@@ -313,12 +310,25 @@ int DrmHwcLayer::InitFromHwcLayer(hwc_layer_1_t *sf_layer, Importer *importer,
       return -EINVAL;
   }
 
-  source_crop = DrmHwcRect<float>(
-      sf_layer->sourceCropf.left, sf_layer->sourceCropf.top,
-      sf_layer->sourceCropf.right, sf_layer->sourceCropf.bottom);
-  display_frame = DrmHwcRect<int>(
-      sf_layer->displayFrame.left, sf_layer->displayFrame.top,
-      sf_layer->displayFrame.right, sf_layer->displayFrame.bottom);
+  int ret = buffer.ImportBuffer(sf_layer->handle, importer);
+  if (ret)
+    return ret;
+
+  ret = handle.CopyBufferHandle(sf_layer->handle, gralloc);
+  if (ret)
+    return ret;
+
+  ret = gralloc->perform(gralloc, GRALLOC_MODULE_PERFORM_GET_USAGE,
+                         handle.get(), &gralloc_buffer_usage);
+  if (ret) {
+    // TODO(zachr): Once GRALLOC_MODULE_PERFORM_GET_USAGE is implemented, remove
+    // "ret = 0" and enable the error logging code.
+    ret = 0;
+#if 0
+    ALOGE("Failed to get usage for buffer %p (%d)", handle.get(), ret);
+    return ret;
+#endif
+  }
 
   return 0;
 }
@@ -330,26 +340,20 @@ static void hwc_dump(struct hwc_composer_device_1 *dev, char *buff,
 
   ctx->drm.compositor()->Dump(&out);
   std::string out_str = out.str();
-  strncpy(buff, out_str.c_str(), std::min((size_t)buff_len, out_str.length()));
+  strncpy(buff, out_str.c_str(),
+          std::min((size_t)buff_len, out_str.length() + 1));
+  buff[buff_len - 1] = '\0';
 }
 
 static int hwc_prepare(hwc_composer_device_1_t *dev, size_t num_displays,
                        hwc_display_contents_1_t **display_contents) {
   struct hwc_context_t *ctx = (struct hwc_context_t *)&dev->common;
 
-  char use_framebuffer_target[PROPERTY_VALUE_MAX];
-  property_get("hwc.drm.use_framebuffer_target", use_framebuffer_target, "0");
-  bool new_use_framebuffer_target = atoi(use_framebuffer_target);
-  if (ctx->use_framebuffer_target != new_use_framebuffer_target)
-    ALOGW("Starting to %s HWC_FRAMEBUFFER_TARGET",
-          new_use_framebuffer_target ? "use" : "not use");
-  ctx->use_framebuffer_target = new_use_framebuffer_target;
-
   for (int i = 0; i < (int)num_displays; ++i) {
     if (!display_contents[i])
       continue;
 
-    bool use_framebuffer_target = ctx->use_framebuffer_target;
+    bool use_framebuffer_target = false;
     if (i == HWC_DISPLAY_VIRTUAL) {
       use_framebuffer_target = true;
     } else {
@@ -447,15 +451,10 @@ static int hwc_set(hwc_composer_device_1_t *dev, size_t num_displays,
       if (sf_layer->flags & HWC_SKIP_LAYER)
         continue;
 
-      if (!ctx->use_framebuffer_target) {
-        if (sf_layer->compositionType == HWC_OVERLAY)
-          indices_to_composite.push_back(j);
-        if (sf_layer->compositionType == HWC_FRAMEBUFFER_TARGET)
-          framebuffer_target_index = j;
-      } else {
-        if (sf_layer->compositionType == HWC_FRAMEBUFFER_TARGET)
-          indices_to_composite.push_back(j);
-      }
+      if (sf_layer->compositionType == HWC_OVERLAY)
+        indices_to_composite.push_back(j);
+      if (sf_layer->compositionType == HWC_FRAMEBUFFER_TARGET)
+        framebuffer_target_index = j;
 
       layer.acquire_fence.Set(sf_layer->acquireFenceFd);
       sf_layer->acquireFenceFd = -1;
@@ -470,23 +469,15 @@ static int hwc_set(hwc_composer_device_1_t *dev, size_t num_displays,
       layer.release_fence = OutputFd(&sf_layer->releaseFenceFd);
     }
 
-    if (ctx->use_framebuffer_target) {
-      if (indices_to_composite.size() != 1) {
-        ALOGE("Expected 1 (got %d) layer with HWC_FRAMEBUFFER_TARGET",
-              indices_to_composite.size());
+    if (indices_to_composite.empty() && framebuffer_target_index >= 0) {
+      hwc_layer_1_t *sf_layer = &dc->hwLayers[framebuffer_target_index];
+      if (!sf_layer->handle || (sf_layer->flags & HWC_SKIP_LAYER)) {
+        ALOGE(
+            "Expected valid layer with HWC_FRAMEBUFFER_TARGET when all "
+            "HWC_OVERLAY layers are skipped.");
         ret = -EINVAL;
       }
-    } else {
-      if (indices_to_composite.empty() && framebuffer_target_index >= 0) {
-        hwc_layer_1_t *sf_layer = &dc->hwLayers[framebuffer_target_index];
-        if (!sf_layer->handle || (sf_layer->flags & HWC_SKIP_LAYER)) {
-          ALOGE(
-              "Expected valid layer with HWC_FRAMEBUFFER_TARGET when all "
-              "HWC_OVERLAY layers are skipped.");
-          ret = -EINVAL;
-        }
-        indices_to_composite.push_back(framebuffer_target_index);
-      }
+      indices_to_composite.push_back(framebuffer_target_index);
     }
   }
 
@@ -496,18 +487,25 @@ static int hwc_set(hwc_composer_device_1_t *dev, size_t num_displays,
   for (size_t i = 0; i < num_displays; ++i) {
     hwc_display_contents_1_t *dc = sf_display_contents[i];
     DrmHwcDisplayContents &display_contents = displays_contents[i];
-    if (!sf_display_contents[i])
+    if (!sf_display_contents[i] || i == HWC_DISPLAY_VIRTUAL)
       continue;
 
     layers_map.emplace_back();
     DrmCompositionDisplayLayersMap &map = layers_map.back();
+    map.display = i;
+    map.geometry_changed =
+        (dc->flags & HWC_GEOMETRY_CHANGED) == HWC_GEOMETRY_CHANGED;
     std::vector<size_t> &indices_to_composite = layers_indices[i];
     for (size_t j : indices_to_composite) {
       hwc_layer_1_t *sf_layer = &dc->hwLayers[j];
 
       DrmHwcLayer &layer = display_contents.layers[j];
 
-      layer.InitFromHwcLayer(sf_layer, ctx->importer, ctx->gralloc);
+      ret = layer.InitFromHwcLayer(sf_layer, ctx->importer, ctx->gralloc);
+      if (ret) {
+        ALOGE("Failed to init composition from layer %d", ret);
+        return ret;
+      }
       map.layers.emplace_back(std::move(layer));
     }
   }
@@ -589,7 +587,8 @@ static int hwc_query(struct hwc_composer_device_1 * /* dev */, int what,
       *value = 1000 * 1000 * 1000 / 60;
       break;
     case HWC_DISPLAY_TYPES_SUPPORTED:
-      *value = HWC_DISPLAY_PRIMARY | HWC_DISPLAY_EXTERNAL | HWC_DISPLAY_VIRTUAL;
+      *value = HWC_DISPLAY_PRIMARY_BIT | HWC_DISPLAY_EXTERNAL_BIT |
+               HWC_DISPLAY_VIRTUAL_BIT;
       break;
   }
   return 0;
